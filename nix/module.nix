@@ -34,6 +34,16 @@ let
     ++ optional (split.right != [ ]) "ip6 saddr { ${concatStringsSep ", " split.right} } tcp dport ${toString cfg.port} accept"
   );
 
+  iptablesRules = concatStringsSep "\n" (
+    map (prefix: "iptables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.wrong
+    ++ map (prefix: "ip6tables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.right
+  );
+
+  iptablesStopRules = concatStringsSep "\n" (
+    map (prefix: "iptables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.wrong
+    ++ map (prefix: "ip6tables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.right
+  );
+
   keyFile = toString cfg.signingKeyFile;
 in
 {
@@ -338,6 +348,8 @@ in
       };
     };
 
-    networking.firewall.extraInputRules = mkIf cfg.openFirewall firewallRules;
+    networking.firewall.extraInputRules = mkIf (cfg.openFirewall && config.networking.nftables.enable) firewallRules;
+    networking.firewall.extraCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) iptablesRules;
+    networking.firewall.extraStopCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) iptablesStopRules;
   };
 }
