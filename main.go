@@ -54,8 +54,8 @@ func run() error {
 	flag.StringVar(&cfg.PublicIPURL, "public-ip-url", "https://api.ipify.org", "URL returning this network's public IP address")
 	flag.DurationVar(&cfg.TrustCheckInterval, "trust-check-interval", time.Minute, "time between public IP checks")
 	flag.DurationVar(&cfg.DiscoveryInterval, "discovery-interval", time.Minute, "time between discovery scans")
-	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 750*time.Millisecond, "timeout for each peer probe")
-	flag.IntVar(&cfg.DiscoveryWorkers, "discovery-workers", 64, "concurrent discovery probes")
+	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 500*time.Millisecond, "timeout for each peer probe")
+	flag.IntVar(&cfg.DiscoveryWorkers, "discovery-workers", 256, "concurrent discovery probes")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS key file")
 	flag.StringVar(&cfg.SecretKeyFile, "secret-key-file", os.Getenv("NIX_SECRET_KEY_FILE"), "binary cache signing key file")
@@ -138,13 +138,7 @@ func run() error {
 		scheme = "https"
 	}
 
-	ttl := 3 * cfg.DiscoveryInterval
-
-	if ttl < 30*time.Second {
-		ttl = 30 * time.Second
-	}
-
-	peers := registry.New(ttl)
+	peers := registry.New()
 	monitor := trust.New(cfg.TrustedNetworks, cfg.PublicIPURL, 5*time.Second, logger)
 	prober := discovery.New(cfg.DiscoveryRanges, cfg.Port, cfg.DiscoveryTimeout, cfg.DiscoveryWorkers, scheme, cfg.InstanceID, peers, logger)
 	prober.Gate = monitor.Trusted

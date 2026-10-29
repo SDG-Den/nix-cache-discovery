@@ -71,10 +71,7 @@ func (prober *Prober) Run(ctx context.Context, interval time.Duration) {
 
 	for {
 		if prober.Gate == nil || prober.Gate() {
-			started := time.Now()
-			found := prober.Scan(ctx)
-
-			prober.Logger.Debug("discovery scan finished", "peers", found, "duration", time.Since(started))
+			prober.Scan(ctx)
 		} else {
 			prober.Logger.Debug("skipping discovery scan outside trusted networks")
 		}
@@ -88,40 +85,60 @@ func (prober *Prober) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (prober *Prober) Scan(ctx context.Context) int {
+	started := time.Now()
+
+	prober.Registry.BeginScan()
+
+	targets := buildTargets(prober.Ranges, localPrefixes(), prober.Registry.Snapshot())
+
 	var (
-		wait    sync.WaitGroup
-		found   atomic.Int64
-		workers = make(chan struct{}, prober.Workers)
+		wait       sync.WaitGroup
+		workers    = make(chan struct{}, prober.Workers)
+		discovered atomic.Int64
 	)
 
-	for _, prefix := range prober.Ranges {
-		for address := prefix.Masked().Addr(); address.IsValid() && prefix.Contains(address); address = address.Next() {
-			if ctx.Err() != nil {
-				break
+	for _, address := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+
+		wait.Add(1)
+		workers <- struct{}{}
+
+		go func(address netip.Addr) {
+			defer wait.Done()
+			defer func() { <-workers }()
+
+			peer, err := prober.probe(ctx, address)
+
+			if err != nil {
+				return
 			}
 
-			wait.Add(1)
-			workers <- struct{}{}
-
-			go func(address netip.Addr) {
-				defer wait.Done()
-				defer func() { <-workers }()
-
-				peer, err := prober.probe(ctx, address)
-
-				if err != nil {
-					return
-				}
-
-				prober.Registry.Mark(*peer)
-				found.Add(1)
-			}(address)
-		}
+			if prober.Registry.Mark(*peer) {
+				discovered.Add(1)
+				prober.Logger.Info("discovered peer", "url", peer.URL, "id", peer.ID)
+			}
+		}(address)
 	}
 
 	wait.Wait()
 
-	return int(found.Load())
+	for _, peer := range prober.Registry.EndScan() {
+		prober.Logger.Info("lost peer", "url", peer.URL, "id", peer.ID)
+	}
+
+	live := len(prober.Registry.Snapshot())
+
+	prober.Logger.Debug(
+		"discovery scan finished",
+		"targets", len(targets),
+		"discovered", discovered.Load(),
+		"peers", live,
+		"duration", time.Since(started),
+	)
+
+	return live
 }
 
 func (prober *Prober) probe(ctx context.Context, address netip.Addr) (*registry.Peer, error) {
@@ -175,6 +192,121 @@ func (prober *Prober) probe(ctx context.Context, address netip.Addr) (*registry.
 		Addr:     address,
 		LastSeen: time.Now(),
 	}, nil
+}
+
+func buildTargets(ranges, locals []netip.Prefix, peers []registry.Peer) []netip.Addr {
+	seen := make(map[netip.Addr]struct{})
+	targets := make([]netip.Addr, 0, 1024)
+
+	add := func(address netip.Addr) {
+		address = address.Unmap()
+
+		if !address.IsValid() {
+			return
+		}
+
+		if _, ok := seen[address]; ok {
+			return
+		}
+
+		inside := false
+
+		for _, prefix := range ranges {
+			if prefix.Contains(address) {
+				inside = true
+				break
+			}
+		}
+
+		if !inside {
+			return
+		}
+
+		seen[address] = struct{}{}
+		targets = append(targets, address)
+	}
+
+	for _, peer := range peers {
+		add(peer.Addr)
+	}
+
+	for _, configured := range ranges {
+		for _, local := range locals {
+			if intersection, ok := intersect(configured, local); ok {
+				enumerate(intersection, add)
+			}
+		}
+	}
+
+	for _, configured := range ranges {
+		enumerate(configured, add)
+	}
+
+	return targets
+}
+
+func localPrefixes() []netip.Prefix {
+	var prefixes []netip.Prefix
+
+	interfaces, err := net.Interfaces()
+
+	if err != nil {
+		return prefixes
+	}
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addresses, err := iface.Addrs()
+
+		if err != nil {
+			continue
+		}
+
+		for _, address := range addresses {
+			prefix, err := netip.ParsePrefix(address.String())
+
+			if err != nil {
+				continue
+			}
+
+			if prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() {
+				continue
+			}
+
+			prefixes = append(prefixes, prefix.Masked())
+		}
+	}
+
+	return prefixes
+}
+
+func intersect(left, right netip.Prefix) (netip.Prefix, bool) {
+	if !left.IsValid() || !right.IsValid() || left.Addr().BitLen() != right.Addr().BitLen() {
+		return netip.Prefix{}, false
+	}
+
+	if left.Bits() >= right.Bits() {
+		if right.Contains(left.Addr()) {
+			return left.Masked(), true
+		}
+
+		return netip.Prefix{}, false
+	}
+
+	if left.Contains(right.Addr()) {
+		return right.Masked(), true
+	}
+
+	return netip.Prefix{}, false
+}
+
+func enumerate(prefix netip.Prefix, add func(netip.Addr)) {
+	for address := prefix.Masked().Addr(); address.IsValid() && prefix.Contains(address); address = address.Next() {
+		add(address)
+	}
 }
 
 type errUnexpectedStatus int

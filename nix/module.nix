@@ -137,8 +137,9 @@ in
         default = [ ];
         example = [ "192.168.1.0/24" ];
         description = ''
-          Prefixes scanned for other instances on the configured port.
-          At most 65536 addresses in total.
+          Prefixes scanned for other instances on the configured port. Local
+          subnets inside these ranges are scanned first. At most 65536
+          addresses in total.
         '';
       };
 
@@ -150,13 +151,13 @@ in
 
       timeout = mkOption {
         type = types.ints.positive;
-        default = 750;
+        default = 500;
         description = "Milliseconds allowed for each probe.";
       };
 
       workers = mkOption {
         type = types.ints.positive;
-        default = 64;
+        default = 256;
         description = "Number of concurrent probes during a scan.";
       };
     };

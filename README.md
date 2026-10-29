@@ -27,6 +27,11 @@ local store only. Registered peers therefore never trigger further proxying, and
 a hop limit bounds the case where a peer is not registered yet. This prevents
 proxy loops and discovery storms.
 
+Discovery probes previously seen peers first, then the host's own subnets, then
+the rest of each configured range. A peer is dropped only after three
+consecutive scans do not find it, so a long sweep over a large range does not
+expire live peers between visits.
+
 ## NixOS usage
 
 ```nix
@@ -163,10 +168,10 @@ configured.
 | `listenAddress` | `"0.0.0.0"` | Bind address. |
 | `allowedClients` | empty uses `discovery.ranges` | Prefixes allowed to connect; everything else gets 403, and only loopback is served outside `trustedNetworks`. |
 | `priority` | `30` | Value advertised in `nix-cache-info`. |
-| `discovery.ranges` | required | Prefixes scanned for peers. Max 65536 addresses. |
+| `discovery.ranges` | required | Prefixes scanned for peers. Local subnets are scanned first. Max 65536 addresses. |
 | `discovery.interval` | `60` | Seconds between scans. |
-| `discovery.timeout` | `750` | Milliseconds per probe. |
-| `discovery.workers` | `64` | Concurrent probes. |
+| `discovery.timeout` | `500` | Milliseconds per probe. |
+| `discovery.workers` | `256` | Concurrent probes. |
 | `fallbackSubstituters` | `[ "https://cache.nixos.org" ]` | Upstream caches checked after the local store and peers. |
 | `verifyFallbackSignatures` | `true` | Verify fallback narinfos against `trusted-public-keys`. |
 | `exclusive` | `true` | Make this daemon the only substituter of the host. |
