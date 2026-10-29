@@ -66,6 +66,23 @@ func TestBuildTargetsIgnoresPeersOutsideRanges(t *testing.T) {
 	}
 }
 
+func TestPrefixForAddress(t *testing.T) {
+	prefixes := []netip.Prefix{
+		netip.MustParsePrefix("192.168.178.0/24"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+	}
+
+	prefix, ok := prefixForAddress(prefixes, netip.MustParseAddr("192.168.178.20"))
+
+	if !ok || prefix.String() != "192.168.178.0/24" {
+		t.Fatalf("unexpected prefix %s, %v", prefix, ok)
+	}
+
+	if _, ok := prefixForAddress(prefixes, netip.MustParseAddr("172.16.0.1")); ok {
+		t.Fatal("expected no prefix for an unrelated address")
+	}
+}
+
 func TestIntersect(t *testing.T) {
 	wide := netip.MustParsePrefix("192.168.0.0/16")
 	narrow := netip.MustParsePrefix("192.168.178.0/24")

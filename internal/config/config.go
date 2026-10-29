@@ -21,6 +21,7 @@ type Config struct {
 	Fallbacks                []string
 	TrustedKeys              []string
 	VerifyFallbackSignatures bool
+	DiscoveryAuto            bool
 	TrustedNetworks          []netip.Prefix
 	PublicIPURL              string
 	TrustCheckInterval       time.Duration

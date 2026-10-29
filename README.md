@@ -136,6 +136,16 @@ it sees a trusted address. The default lookup endpoint is a third-party service;
 point `publicIpUrl` at an endpoint you control if that request should not leave
 your infrastructure.
 
+### Automatic LAN detection
+
+`discovery.auto = true` makes the daemon use the subnet of the interface that
+carries the default route instead of fixed ranges. The same subnet is used for
+the runtime allowlist, and the firewall opens the port only to private,
+link-local and unique-local addresses. Fixed ranges are ignored while this is
+enabled. The subnet is resolved at startup, so restart the service after the
+network is connected, for example after joining Wi-Fi in the installer. The
+ojuny template enables this mode by default.
+
 ### Upstream caches and substituter order
 
 By default `exclusive = true`, so Nix only talks to this daemon. Set
@@ -168,7 +178,8 @@ configured.
 | `listenAddress` | `"0.0.0.0"` | Bind address. |
 | `allowedClients` | empty uses `discovery.ranges` | Prefixes allowed to connect; everything else gets 403, and only loopback is served outside `trustedNetworks`. |
 | `priority` | `30` | Value advertised in `nix-cache-info`. |
-| `discovery.ranges` | required | Prefixes scanned for peers. Local subnets are scanned first. Max 65536 addresses. |
+| `discovery.ranges` | required unless auto | Prefixes scanned for peers. Local subnets are scanned first. Max 65536 addresses. |
+| `discovery.auto` | `false` | Use the connected subnet instead of fixed ranges. |
 | `discovery.interval` | `60` | Seconds between scans. |
 | `discovery.timeout` | `500` | Milliseconds per probe. |
 | `discovery.workers` | `256` | Concurrent probes. |

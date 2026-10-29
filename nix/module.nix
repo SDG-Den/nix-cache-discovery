@@ -27,22 +27,91 @@ let
     else
       cfg.discovery.ranges;
 
-  split = lib.partition (value: lib.hasInfix ":" value) allowedClients;
-
-  firewallRules = concatStringsSep "\n" (
-    optional (split.wrong != [ ]) "ip saddr { ${concatStringsSep ", " split.wrong} } tcp dport ${toString cfg.port} accept"
-    ++ optional (split.right != [ ]) "ip6 saddr { ${concatStringsSep ", " split.right} } tcp dport ${toString cfg.port} accept"
+  staticPrefixes = lib.filter isLocalPrefix (
+    lib.unique (
+      lib.concatMap (
+        name:
+        let
+          interface = config.networking.interfaces.${name};
+          addresses = (interface.ipv4.addresses or [ ]) ++ (interface.ipv6.addresses or [ ]);
+        in
+        lib.optionals (name != "lo") (
+          map (address: "${address.address}/${toString address.prefixLength}") addresses
+        )
+      ) (lib.attrNames config.networking.interfaces)
+    )
   );
 
-  iptablesRules = concatStringsSep "\n" (
-    map (prefix: "iptables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.wrong
-    ++ map (prefix: "ip6tables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.right
-  );
+  isLocalPrefix =
+    prefix:
+    lib.any (local: lib.hasPrefix local prefix) (
+      [
+        "10."
+        "192.168."
+        "169.254."
+      ]
+      ++ map (octet: "172.${toString octet}.") (lib.range 16 31)
+      ++ [
+        "fc"
+        "fd"
+        "fe8"
+        "fe9"
+        "fea"
+        "feb"
+      ]
+    );
 
-  iptablesStopRules = concatStringsSep "\n" (
-    map (prefix: "iptables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.wrong
-    ++ map (prefix: "ip6tables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.right
-  );
+  nftRulesFor =
+    prefixes:
+    let
+      split = lib.partition (value: lib.hasInfix ":" value) prefixes;
+    in
+    concatStringsSep "\n" (
+      optional (split.wrong != [ ]) "ip saddr { ${concatStringsSep ", " split.wrong} } tcp dport ${toString cfg.port} accept"
+      ++ optional (split.right != [ ]) "ip6 saddr { ${concatStringsSep ", " split.right} } tcp dport ${toString cfg.port} accept"
+    );
+
+  iptablesRulesFor =
+    prefixes:
+    let
+      split = lib.partition (value: lib.hasInfix ":" value) prefixes;
+    in
+    concatStringsSep "\n" (
+      map (prefix: "iptables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.wrong
+      ++ map (prefix: "ip6tables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.right
+    );
+
+  iptablesStopRulesFor =
+    prefixes:
+    let
+      split = lib.partition (value: lib.hasInfix ":" value) prefixes;
+    in
+    concatStringsSep "\n" (
+      map (prefix: "iptables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.wrong
+      ++ map (prefix: "ip6tables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.right
+    );
+
+  firewallRules = nftRulesFor allowedClients;
+  iptablesRules = iptablesRulesFor allowedClients;
+  iptablesStopRules = iptablesStopRulesFor allowedClients;
+
+  localRanges = {
+    ipv4 = [
+      "10.0.0.0/8"
+      "172.16.0.0/12"
+      "192.168.0.0/16"
+      "169.254.0.0/16"
+    ];
+    ipv6 = [
+      "fc00::/7"
+      "fe80::/10"
+    ];
+  };
+
+  autoPrefixes = if staticPrefixes != [ ] then staticPrefixes else localRanges.ipv4 ++ localRanges.ipv6;
+  autoFirewallRules = nftRulesFor autoPrefixes;
+  autoIptablesRules = iptablesRulesFor autoPrefixes;
+  autoIptablesStopRules = iptablesStopRulesFor autoPrefixes;
 
   keyFile = toString cfg.signingKeyFile;
 in
@@ -79,7 +148,8 @@ in
         Client prefixes allowed to connect and the only prefixes the daemon
         probes during discovery. Requests from any other address are answered
         with 403. An empty list uses
-        {option}`services.nix-cache-discovery.discovery.ranges`.
+        {option}`services.nix-cache-discovery.discovery.ranges`. Ignored while
+        {option}`services.nix-cache-discovery.discovery.auto` is enabled.
       '';
     };
 
@@ -149,7 +219,18 @@ in
         description = ''
           Prefixes scanned for other instances on the configured port. Local
           subnets inside these ranges are scanned first. At most 65536
-          addresses in total.
+          addresses in total. Ignored while discovery.auto is enabled.
+        '';
+      };
+
+      auto = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Use the connected network's subnet at startup for discovery and the
+          client allowlist. Explicit discovery ranges are ignored while this
+          is enabled. The firewall opens the cache port to private, link-local
+          and unique-local addresses, never to internet addresses.
         '';
       };
 
@@ -222,7 +303,12 @@ in
     openFirewall = mkOption {
       type = types.bool;
       default = true;
-      description = "Open the cache port to the allowed client prefixes only.";
+      description = ''
+        Open the cache port in the firewall. With discovery.auto enabled the
+        port is opened to private, link-local and unique-local addresses; the
+        daemon's runtime allowlist still restricts clients to the connected
+        subnet.
+      '';
     };
 
     extraArgs = mkOption {
@@ -235,8 +321,8 @@ in
   config = mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.discovery.ranges != [ ];
-        message = "services.nix-cache-discovery.discovery.ranges must not be empty.";
+        assertion = cfg.discovery.ranges != [ ] || cfg.discovery.auto;
+        message = "services.nix-cache-discovery.discovery.ranges must not be empty unless discovery.auto is enabled.";
       }
       {
         assertion = cfg.signingKeyFile == null || cfg.publicKey != null;
@@ -298,6 +384,7 @@ in
             "--discovery-workers"
             (toString cfg.discovery.workers)
           ]
+          ++ optionals cfg.discovery.auto [ "--discovery-auto" ]
           ++ optionals (cfg.fallbackSubstituters != [ ]) [
             "--fallback-substituter"
             (concatStringsSep "," cfg.fallbackSubstituters)
@@ -348,8 +435,14 @@ in
       };
     };
 
-    networking.firewall.extraInputRules = mkIf (cfg.openFirewall && config.networking.nftables.enable) firewallRules;
-    networking.firewall.extraCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) iptablesRules;
-    networking.firewall.extraStopCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) iptablesStopRules;
+    networking.firewall.extraInputRules = mkIf (cfg.openFirewall && config.networking.nftables.enable) (
+      if cfg.discovery.auto then autoFirewallRules else firewallRules
+    );
+    networking.firewall.extraCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) (
+      if cfg.discovery.auto then autoIptablesRules else iptablesRules
+    );
+    networking.firewall.extraStopCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) (
+      if cfg.discovery.auto then autoIptablesStopRules else iptablesStopRules
+    );
   };
 }

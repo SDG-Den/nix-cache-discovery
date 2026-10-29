@@ -245,6 +245,54 @@ func buildTargets(ranges, locals []netip.Prefix, peers []registry.Peer) []netip.
 	return targets
 }
 
+func PrimaryPrefixes() []netip.Prefix {
+	if prefix, ok := primaryPrefix(); ok {
+		return []netip.Prefix{prefix}
+	}
+
+	prefixes := localPrefixes()
+
+	if len(prefixes) > 0 {
+		return prefixes[:1]
+	}
+
+	return nil
+}
+
+func primaryPrefix() (netip.Prefix, bool) {
+	connection, err := net.Dial("udp4", "1.1.1.1:80")
+
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+
+	defer connection.Close()
+
+	address, ok := connection.LocalAddr().(*net.UDPAddr)
+
+	if !ok {
+		return netip.Prefix{}, false
+	}
+
+	local, ok := netip.AddrFromSlice(address.IP)
+
+	if !ok {
+		return netip.Prefix{}, false
+	}
+
+	return prefixForAddress(localPrefixes(), local.Unmap())
+}
+
+func prefixForAddress(prefixes []netip.Prefix, address netip.Addr) (netip.Prefix, bool) {
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return prefix, true
+		}
+	}
+
+	return netip.Prefix{}, false
+}
+
 func localPrefixes() []netip.Prefix {
 	var prefixes []netip.Prefix
 

@@ -56,6 +56,7 @@ func run() error {
 	flag.DurationVar(&cfg.DiscoveryInterval, "discovery-interval", time.Minute, "time between discovery scans")
 	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 500*time.Millisecond, "timeout for each peer probe")
 	flag.IntVar(&cfg.DiscoveryWorkers, "discovery-workers", 256, "concurrent discovery probes")
+	flag.BoolVar(&cfg.DiscoveryAuto, "discovery-auto", false, "use the connected network's subnets for discovery and serving")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS key file")
 	flag.StringVar(&cfg.SecretKeyFile, "secret-key-file", os.Getenv("NIX_SECRET_KEY_FILE"), "binary cache signing key file")
@@ -87,6 +88,17 @@ func run() error {
 
 	if err != nil {
 		return err
+	}
+
+	if cfg.DiscoveryAuto {
+		prefixes := discovery.PrimaryPrefixes()
+
+		if len(prefixes) == 0 {
+			return errors.New("automatic discovery found no usable local prefix")
+		}
+
+		cfg.DiscoveryRanges = prefixes
+		cfg.AllowedClients = prefixes
 	}
 
 	if len(cfg.AllowedClients) == 0 {
