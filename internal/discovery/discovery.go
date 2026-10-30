@@ -36,6 +36,7 @@ type Prober struct {
 
 	mutex  sync.RWMutex
 	client *http.Client
+	wake   chan struct{}
 }
 
 func (prober *Prober) SetRanges(ranges []netip.Prefix) {
@@ -66,6 +67,7 @@ func New(ranges []netip.Prefix, port int, timeout time.Duration, workers int, sc
 	}
 
 	return &Prober{
+		wake:     make(chan struct{}, 1),
 		Ranges:   ranges,
 		Port:     port,
 		Timeout:  timeout,
@@ -78,6 +80,13 @@ func New(ranges []netip.Prefix, port int, timeout time.Duration, workers int, sc
 			Transport: transport,
 			Timeout:   timeout,
 		},
+	}
+}
+
+func (prober *Prober) ScanNow() {
+	select {
+	case prober.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -95,6 +104,7 @@ func (prober *Prober) Run(ctx context.Context, interval time.Duration) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-prober.wake:
 		case <-ticker.C:
 		}
 	}

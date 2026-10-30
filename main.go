@@ -217,7 +217,6 @@ func run() error {
 				if len(prefixes) == 0 {
 					if connected {
 						logger.Warn("lost the local network prefix, holding requests until it returns")
-						peers.Clear()
 						prober.SetRanges(nil)
 						connected = false
 					}
@@ -229,6 +228,7 @@ func run() error {
 
 				if !connected {
 					logger.Info("local network prefix is back", "prefixes", fmt.Sprint(prefixes))
+					prober.ScanNow()
 					connected = true
 				}
 			}
