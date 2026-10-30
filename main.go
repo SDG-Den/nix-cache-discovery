@@ -24,6 +24,8 @@ import (
 	"github.com/den/nix-cache-discovery/internal/trust"
 )
 
+const autoPrefixInterval = 10 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
@@ -64,6 +66,9 @@ func run() error {
 	flag.StringVar(&cfg.InstanceID, "instance-id", "", "instance identifier used to exclude this host from discovery")
 	flag.Parse()
 
+	logger := newLogger(cfg.LogLevel)
+	slog.SetDefault(logger)
+
 	var err error
 
 	cfg.DiscoveryRanges, err = config.ParsePrefixes(discoveryRange)
@@ -91,14 +96,24 @@ func run() error {
 	}
 
 	if cfg.DiscoveryAuto {
-		prefixes := discovery.PrimaryPrefixes()
+		for {
+			prefixes := discovery.PrimaryPrefixes()
 
-		if len(prefixes) == 0 {
-			return errors.New("automatic discovery found no usable local prefix")
+			if len(prefixes) > 0 {
+				cfg.DiscoveryRanges = prefixes
+				cfg.AllowedClients = prefixes
+
+				break
+			}
+
+			logger.Warn(
+				"automatic discovery found no usable local prefix, waiting for a network connection",
+				"retry",
+				autoPrefixInterval,
+			)
+
+			time.Sleep(autoPrefixInterval)
 		}
-
-		cfg.DiscoveryRanges = prefixes
-		cfg.AllowedClients = prefixes
 	}
 
 	if len(cfg.AllowedClients) == 0 {
@@ -126,9 +141,6 @@ func run() error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-
-	logger := newLogger(cfg.LogLevel)
-	slog.SetDefault(logger)
 
 	if cfg.VerifyFallbackSignatures && len(cfg.TrustedKeys) == 0 {
 		logger.Warn("fallback signature verification is enabled but no trusted public keys are configured")
@@ -181,6 +193,32 @@ func run() error {
 	monitor.Refresh(onTrustChange)
 	go monitor.Run(ctx, cfg.TrustCheckInterval, onTrustChange)
 	go prober.Run(ctx, cfg.DiscoveryInterval)
+
+	if cfg.DiscoveryAuto {
+		go func() {
+			ticker := time.NewTicker(autoPrefixInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+
+				if len(discovery.PrimaryPrefixes()) > 0 {
+					continue
+				}
+
+				logger.Warn(
+					"lost the local network prefix, exiting so the service restarts and waits for a network connection",
+				)
+				stop()
+
+				return
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:              config.ListenAddress(cfg.Host, cfg.Port),
