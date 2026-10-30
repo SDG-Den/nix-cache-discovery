@@ -36,6 +36,10 @@ type Proxier struct {
 	Logger                   *slog.Logger
 	PositiveTTL              time.Duration
 	NegativeTTL              time.Duration
+	Timeout                  time.Duration
+	Retries                  int
+	WaitTimeout              time.Duration
+	PollInterval             time.Duration
 
 	client       *http.Client
 	streamClient *http.Client
@@ -50,12 +54,15 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-func New(peers *registry.Registry, storeDir, secretKey, selfID string, fallbacks, trustedKeys []string, verifyFallbackSignatures bool, timeout time.Duration, scheme string, logger *slog.Logger) *Proxier {
+func New(peers *registry.Registry, storeDir, secretKey, selfID string, fallbacks, trustedKeys []string, verifyFallbackSignatures bool, timeout time.Duration, retries int, scheme string, logger *slog.Logger) *Proxier {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 
 	if scheme == "https" {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+
+	streamTransport := transport.Clone()
+	streamTransport.ResponseHeaderTimeout = timeout
 
 	return &Proxier{
 		Registry:                 peers,
@@ -68,27 +75,56 @@ func New(peers *registry.Registry, storeDir, secretKey, selfID string, fallbacks
 		Logger:                   logger,
 		PositiveTTL:              10 * time.Minute,
 		NegativeTTL:              15 * time.Second,
+		Timeout:                  timeout,
+		Retries:                  retries,
+		WaitTimeout:              2 * time.Minute,
+		PollInterval:             2 * time.Second,
 		client:                   &http.Client{Transport: transport, Timeout: timeout},
-		streamClient:             &http.Client{Transport: transport.Clone()},
+		streamClient:             &http.Client{Transport: streamTransport},
 		cache:                    make(map[string]cacheEntry),
 		misses:                   make(map[string]time.Time),
 	}
 }
 
-func (proxier *Proxier) Narinfo(ctx context.Context, hashPart string, hops int) ([]byte, bool) {
+func (proxier *Proxier) Narinfo(ctx context.Context, hashPart string, hops int) ([]byte, bool, error) {
+	deadline := time.Now().Add(proxier.WaitTimeout)
+
+	for {
+		body, found, err := proxier.narinfoOnce(ctx, hashPart, hops)
+
+		if found || err == nil || time.Now().After(deadline) {
+			return body, found, err
+		}
+
+		proxier.Logger.Debug("waiting for a cache source", "hash", hashPart, "error", err)
+
+		if err := sleepContext(ctx, proxier.PollInterval); err != nil {
+			return nil, false, err
+		}
+	}
+}
+
+func (proxier *Proxier) narinfoOnce(ctx context.Context, hashPart string, hops int) ([]byte, bool, error) {
 	if body, ok := proxier.cached(hashPart); ok {
-		return body, true
+		return body, true, nil
 	}
 
 	if proxier.recentlyMissed(hashPart) {
-		return nil, false
+		return nil, false, nil
 	}
+
+	var transientErr error
 
 	for _, peer := range proxier.Registry.Snapshot() {
 		body, err := proxier.fetchNarinfo(ctx, peer.URL, hashPart, hops)
 
 		if err != nil {
 			proxier.Logger.Debug("peer narinfo miss", "peer", peer.URL, "hash", hashPart, "error", err)
+
+			if isTransient(err) {
+				transientErr = err
+			}
+
 			continue
 		}
 
@@ -111,7 +147,7 @@ func (proxier *Proxier) Narinfo(ctx context.Context, hashPart string, hops int) 
 		}
 
 		proxier.remember(hashPart, body)
-		return body, true
+		return body, true, nil
 	}
 
 	for _, fallback := range proxier.Fallbacks {
@@ -119,6 +155,11 @@ func (proxier *Proxier) Narinfo(ctx context.Context, hashPart string, hops int) 
 
 		if err != nil {
 			proxier.Logger.Debug("fallback narinfo miss", "fallback", fallback, "hash", hashPart, "error", err)
+
+			if isTransient(err) {
+				transientErr = err
+			}
+
 			continue
 		}
 
@@ -148,14 +189,36 @@ func (proxier *Proxier) Narinfo(ctx context.Context, hashPart string, hops int) 
 		}
 
 		proxier.remember(hashPart, body)
-		return body, true
+		return body, true, nil
+	}
+
+	if transientErr != nil {
+		return nil, false, transientErr
 	}
 
 	proxier.rememberMiss(hashPart)
-	return nil, false
+	return nil, false, nil
 }
 
-func (proxier *Proxier) Nar(ctx context.Context, w http.ResponseWriter, path string, hops int) bool {
+func (proxier *Proxier) Nar(ctx context.Context, w http.ResponseWriter, path string, hops int) (bool, error) {
+	deadline := time.Now().Add(proxier.WaitTimeout)
+
+	for {
+		found, err := proxier.narOnce(ctx, w, path, hops)
+
+		if found || err == nil || time.Now().After(deadline) {
+			return found, err
+		}
+
+		proxier.Logger.Debug("waiting for a cache source", "path", path, "error", err)
+
+		if err := sleepContext(ctx, proxier.PollInterval); err != nil {
+			return false, err
+		}
+	}
+}
+
+func (proxier *Proxier) narOnce(ctx context.Context, w http.ResponseWriter, path string, hops int) (bool, error) {
 	sources := make([]string, 0, len(proxier.Fallbacks)+1)
 	interior := strings.TrimSuffix(strings.TrimPrefix(path, "/nar/"), ".nar")
 
@@ -167,11 +230,41 @@ func (proxier *Proxier) Nar(ctx context.Context, w http.ResponseWriter, path str
 
 	sources = append(sources, proxier.Fallbacks...)
 
+	var transientErr error
+
 	for _, source := range sources {
+		streamed, err := proxier.streamNar(ctx, w, source, path, hops)
+
+		if streamed {
+			return true, nil
+		}
+
+		if err != nil {
+			proxier.Logger.Debug("nar request failed", "source", source, "error", err)
+
+			if isTransient(err) {
+				transientErr = err
+			}
+		}
+	}
+
+	return false, transientErr
+}
+
+func (proxier *Proxier) streamNar(ctx context.Context, w http.ResponseWriter, source, path string, hops int) (bool, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= proxier.Retries; attempt++ {
+		if attempt > 0 {
+			if err := sleepContext(ctx, retryBackoff(attempt)); err != nil {
+				return false, err
+			}
+		}
+
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, source+path, nil)
 
 		if err != nil {
-			continue
+			return false, err
 		}
 
 		request.Header.Set(PeerHeader, proxier.SelfID)
@@ -180,12 +273,23 @@ func (proxier *Proxier) Nar(ctx context.Context, w http.ResponseWriter, path str
 		response, err := proxier.streamClient.Do(request)
 
 		if err != nil {
-			proxier.Logger.Debug("nar request failed", "source", source, "error", err)
+			lastErr = err
+
+			if !isTransient(err) || ctx.Err() != nil {
+				return false, err
+			}
+
 			continue
 		}
 
 		if response.StatusCode != http.StatusOK {
 			response.Body.Close()
+			lastErr = statusError{code: response.StatusCode}
+
+			if !isTransient(lastErr) {
+				return false, lastErr
+			}
+
 			continue
 		}
 
@@ -201,14 +305,40 @@ func (proxier *Proxier) Nar(ctx context.Context, w http.ResponseWriter, path str
 		}
 
 		response.Body.Close()
-		return true
+		return true, nil
 	}
 
-	return false
+	return false, lastErr
 }
 
 func (proxier *Proxier) fetchNarinfo(ctx context.Context, source, hashPart string, hops int) ([]byte, error) {
-	timeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	var lastErr error
+
+	for attempt := 0; attempt <= proxier.Retries; attempt++ {
+		if attempt > 0 {
+			if err := sleepContext(ctx, retryBackoff(attempt)); err != nil {
+				return nil, err
+			}
+		}
+
+		body, err := proxier.fetchNarinfoOnce(ctx, source, hashPart, hops)
+
+		if err == nil {
+			return body, nil
+		}
+
+		lastErr = err
+
+		if !isTransient(err) || ctx.Err() != nil {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (proxier *Proxier) fetchNarinfoOnce(ctx context.Context, source, hashPart string, hops int) ([]byte, error) {
+	timeout, cancel := context.WithTimeout(ctx, proxier.Timeout)
 	defer cancel()
 
 	request, err := http.NewRequestWithContext(timeout, http.MethodGet, source+"/"+hashPart+".narinfo", nil)
@@ -228,11 +358,55 @@ func (proxier *Proxier) fetchNarinfo(ctx context.Context, source, hashPart strin
 
 	defer response.Body.Close()
 
+	if response.StatusCode == http.StatusNotFound {
+		return nil, errNotFound
+	}
+
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("source returned status %d", response.StatusCode)
+		return nil, statusError{code: response.StatusCode}
 	}
 
 	return io.ReadAll(io.LimitReader(response.Body, maxBody))
+}
+
+type statusError struct {
+	code int
+}
+
+func (err statusError) Error() string {
+	return fmt.Sprintf("source returned status %d", err.code)
+}
+
+var errNotFound = errors.New("not found")
+
+func isTransient(err error) bool {
+	if errors.Is(err, errNotFound) {
+		return false
+	}
+
+	var status statusError
+
+	if errors.As(err, &status) {
+		return status.code >= 500 || status.code == http.StatusTooManyRequests
+	}
+
+	return true
+}
+
+func retryBackoff(attempt int) time.Duration {
+	return time.Duration(attempt) * time.Second
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func validate(body []byte, hashPart string) error {

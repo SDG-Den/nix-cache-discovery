@@ -22,6 +22,9 @@ type Config struct {
 	TrustedKeys              []string
 	VerifyFallbackSignatures bool
 	DiscoveryAuto            bool
+	ProxyTimeout             time.Duration
+	ProxyRetries             int
+	ProxyWait                time.Duration
 	TrustedNetworks          []netip.Prefix
 	PublicIPURL              string
 	TrustCheckInterval       time.Duration
@@ -74,6 +77,12 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("discovery interval must be at least 1s")
 	case cfg.DiscoveryTimeout <= 0:
 		return fmt.Errorf("discovery timeout must be positive")
+	case cfg.ProxyTimeout <= 0:
+		return fmt.Errorf("proxy timeout must be positive")
+	case cfg.ProxyRetries < 0:
+		return fmt.Errorf("proxy retries must not be negative")
+	case cfg.ProxyWait <= 0:
+		return fmt.Errorf("proxy wait must be positive")
 	case len(cfg.DiscoveryRanges) == 0:
 		return fmt.Errorf("at least one discovery range is required")
 	case len(cfg.AllowedClients) == 0:

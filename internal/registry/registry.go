@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const maxMisses = 3
+const maxMisses = 5
 
 type Peer struct {
 	ID       string

@@ -21,11 +21,7 @@ let
   scheme = if cfg.tls.enable then "https" else "http";
   localURL = "${scheme}://127.0.0.1:${toString cfg.port}";
 
-  allowedClients =
-    if cfg.allowedClients != [ ] then
-      cfg.allowedClients
-    else
-      cfg.discovery.ranges;
+  allowedClients = if cfg.allowedClients != [ ] then cfg.allowedClients else cfg.discovery.ranges;
 
   staticPrefixes = lib.filter isLocalPrefix (
     lib.unique (
@@ -67,8 +63,12 @@ let
       split = lib.partition (value: lib.hasInfix ":" value) prefixes;
     in
     concatStringsSep "\n" (
-      optional (split.wrong != [ ]) "ip saddr { ${concatStringsSep ", " split.wrong} } tcp dport ${toString cfg.port} accept"
-      ++ optional (split.right != [ ]) "ip6 saddr { ${concatStringsSep ", " split.right} } tcp dport ${toString cfg.port} accept"
+      optional (
+        split.wrong != [ ]
+      ) "ip saddr { ${concatStringsSep ", " split.wrong} } tcp dport ${toString cfg.port} accept"
+      ++ optional (
+        split.right != [ ]
+      ) "ip6 saddr { ${concatStringsSep ", " split.right} } tcp dport ${toString cfg.port} accept"
     );
 
   iptablesRulesFor =
@@ -77,8 +77,14 @@ let
       split = lib.partition (value: lib.hasInfix ":" value) prefixes;
     in
     concatStringsSep "\n" (
-      map (prefix: "iptables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.wrong
-      ++ map (prefix: "ip6tables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept") split.right
+      map (
+        prefix:
+        "iptables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept"
+      ) split.wrong
+      ++ map (
+        prefix:
+        "ip6tables -w -A nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept"
+      ) split.right
     );
 
   iptablesStopRulesFor =
@@ -87,8 +93,14 @@ let
       split = lib.partition (value: lib.hasInfix ":" value) prefixes;
     in
     concatStringsSep "\n" (
-      map (prefix: "iptables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.wrong
-      ++ map (prefix: "ip6tables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true") split.right
+      map (
+        prefix:
+        "iptables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true"
+      ) split.wrong
+      ++ map (
+        prefix:
+        "ip6tables -w -D nixos-fw -p tcp -s ${prefix} --dport ${toString cfg.port} -j nixos-fw-accept || true"
+      ) split.right
     );
 
   firewallRules = nftRulesFor allowedClients;
@@ -108,7 +120,8 @@ let
     ];
   };
 
-  autoPrefixes = if staticPrefixes != [ ] then staticPrefixes else localRanges.ipv4 ++ localRanges.ipv6;
+  autoPrefixes =
+    if staticPrefixes != [ ] then staticPrefixes else localRanges.ipv4 ++ localRanges.ipv6;
   autoFirewallRules = nftRulesFor autoPrefixes;
   autoIptablesRules = iptablesRulesFor autoPrefixes;
   autoIptablesStopRules = iptablesStopRulesFor autoPrefixes;
@@ -253,6 +266,39 @@ in
       };
     };
 
+    proxy = {
+      timeout = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = ''
+          Seconds allowed for each upstream narinfo request before it is
+          retried. Slow caches are waited for instead of being treated as a
+          miss, so clients do not fall back to building.
+        '';
+      };
+
+      wait = mkOption {
+        type = types.ints.positive;
+        default = 120;
+        description = ''
+          Seconds a request may be held while no cache source is reachable.
+          This keeps a client waiting through a short network drop instead of
+          failing the build. Keep it below the client's stalled download
+          timeout.
+        '';
+      };
+
+      retries = mkOption {
+        type = types.ints.unsigned;
+        default = 3;
+        description = ''
+          Number of extra attempts per upstream source when it times out or
+          answers with a server error. Clients receive a retryable error only
+          after all sources and attempts are exhausted.
+        '';
+      };
+    };
+
     tls = {
       enable = mkEnableOption "TLS for the cache and for peer communication";
 
@@ -383,6 +429,12 @@ in
             "${toString cfg.discovery.timeout}ms"
             "--discovery-workers"
             (toString cfg.discovery.workers)
+            "--proxy-timeout"
+            "${toString cfg.proxy.timeout}s"
+            "--proxy-retries"
+            (toString cfg.proxy.retries)
+            "--proxy-wait"
+            "${toString cfg.proxy.wait}s"
           ]
           ++ optionals cfg.discovery.auto [ "--discovery-auto" ]
           ++ optionals (cfg.fallbackSubstituters != [ ]) [
@@ -442,8 +494,8 @@ in
     networking.firewall.extraCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) (
       if cfg.discovery.auto then autoIptablesRules else iptablesRules
     );
-    networking.firewall.extraStopCommands = mkIf (cfg.openFirewall && !config.networking.nftables.enable) (
-      if cfg.discovery.auto then autoIptablesStopRules else iptablesStopRules
-    );
+    networking.firewall.extraStopCommands = mkIf (
+      cfg.openFirewall && !config.networking.nftables.enable
+    ) (if cfg.discovery.auto then autoIptablesStopRules else iptablesStopRules);
   };
 }

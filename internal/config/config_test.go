@@ -30,6 +30,8 @@ func TestValidateRejectsRangeOutsideAllowedClients(t *testing.T) {
 		DiscoveryInterval: time.Minute,
 		DiscoveryTimeout:  time.Second,
 		DiscoveryWorkers:  4,
+		ProxyTimeout:      30 * time.Second,
+		ProxyWait:         2 * time.Minute,
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -45,6 +47,8 @@ func TestValidateAcceptsContainedRange(t *testing.T) {
 		DiscoveryInterval: time.Minute,
 		DiscoveryTimeout:  time.Second,
 		DiscoveryWorkers:  4,
+		ProxyTimeout:      30 * time.Second,
+		ProxyWait:         2 * time.Minute,
 	}
 
 	if err := cfg.Validate(); err != nil {

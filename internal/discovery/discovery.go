@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -33,7 +34,22 @@ type Prober struct {
 	Registry *registry.Registry
 	Logger   *slog.Logger
 
+	mutex  sync.RWMutex
 	client *http.Client
+}
+
+func (prober *Prober) SetRanges(ranges []netip.Prefix) {
+	prober.mutex.Lock()
+	defer prober.mutex.Unlock()
+
+	prober.Ranges = ranges
+}
+
+func (prober *Prober) ranges() []netip.Prefix {
+	prober.mutex.RLock()
+	defer prober.mutex.RUnlock()
+
+	return prober.Ranges
 }
 
 func New(ranges []netip.Prefix, port int, timeout time.Duration, workers int, scheme, selfID string, peers *registry.Registry, logger *slog.Logger) *Prober {
@@ -89,7 +105,7 @@ func (prober *Prober) Scan(ctx context.Context) int {
 
 	prober.Registry.BeginScan()
 
-	targets := buildTargets(prober.Ranges, localPrefixes(), prober.Registry.Snapshot())
+	targets := buildTargets(prober.ranges(), localPrefixes(), prober.Registry.Snapshot())
 
 	var (
 		wait       sync.WaitGroup
@@ -142,6 +158,35 @@ func (prober *Prober) Scan(ctx context.Context) int {
 }
 
 func (prober *Prober) probe(ctx context.Context, address netip.Addr) (*registry.Peer, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+
+		peer, err := prober.probeOnce(ctx, address)
+
+		if err == nil {
+			return peer, nil
+		}
+
+		lastErr = err
+
+		var status errUnexpectedStatus
+		if errors.As(err, &status) {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (prober *Prober) probeOnce(ctx context.Context, address netip.Addr) (*registry.Peer, error) {
 	base := prober.Scheme + "://" + net.JoinHostPort(address.String(), strconv.Itoa(prober.Port))
 	timeout, cancel := context.WithTimeout(ctx, prober.Timeout)
 	defer cancel()

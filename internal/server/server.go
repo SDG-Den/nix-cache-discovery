@@ -87,8 +87,19 @@ func (server *Server) handleNarinfo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var found bool
-		body, found = server.options.Proxier.Narinfo(r.Context(), hashPart, hopsFrom(r))
+		var (
+			found    bool
+			proxyErr error
+		)
+
+		body, found, proxyErr = server.options.Proxier.Narinfo(r.Context(), hashPart, hopsFrom(r))
+
+		if proxyErr != nil {
+			server.options.Logger.Warn("cache temporarily unavailable", "hash", hashPart, "error", proxyErr)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "Cache temporarily unavailable.\n", http.StatusServiceUnavailable)
+			return
+		}
 
 		if !found {
 			http.Error(w, "No such path.\n", http.StatusNotFound)
@@ -146,7 +157,16 @@ func (server *Server) handleNar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if server.options.Proxier.Nar(r.Context(), w, r.URL.Path, hopsFrom(r)) {
+	found, err := server.options.Proxier.Nar(r.Context(), w, r.URL.Path, hopsFrom(r))
+
+	if found {
+		return
+	}
+
+	if err != nil {
+		server.options.Logger.Warn("nar temporarily unavailable", "path", r.URL.Path, "error", err)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Cache temporarily unavailable.\n", http.StatusServiceUnavailable)
 		return
 	}
 

@@ -25,13 +25,13 @@ func TestMarkReportsNewPeers(t *testing.T) {
 	}
 }
 
-func TestEndScanRemovesPeersAfterThreeMisses(t *testing.T) {
+func TestEndScanRemovesPeersAfterFiveMisses(t *testing.T) {
 	registry := New()
 	url := "http://192.168.178.10:5055"
 
 	registry.Mark(peer(url))
 
-	for scan := 1; scan <= 2; scan++ {
+	for scan := 1; scan <= 4; scan++ {
 		registry.BeginScan()
 
 		if removed := registry.EndScan(); len(removed) != 0 {
@@ -44,7 +44,7 @@ func TestEndScanRemovesPeersAfterThreeMisses(t *testing.T) {
 	removed := registry.EndScan()
 
 	if len(removed) != 1 || removed[0].URL != url {
-		t.Fatalf("expected the peer to be removed on the third miss, got %#v", removed)
+		t.Fatalf("expected the peer to be removed on the fifth miss, got %#v", removed)
 	}
 
 	if len(registry.Snapshot()) != 0 {

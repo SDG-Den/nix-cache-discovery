@@ -55,6 +55,9 @@ func run() error {
 	flag.Var(&trustedNets, "trusted-network", "comma separated public IPs or prefixes where serving and discovery are allowed")
 	flag.StringVar(&cfg.PublicIPURL, "public-ip-url", "https://api.ipify.org", "URL returning this network's public IP address")
 	flag.DurationVar(&cfg.TrustCheckInterval, "trust-check-interval", time.Minute, "time between public IP checks")
+	flag.DurationVar(&cfg.ProxyTimeout, "proxy-timeout", 30*time.Second, "timeout for each upstream narinfo request")
+	flag.IntVar(&cfg.ProxyRetries, "proxy-retries", 3, "retries per upstream source when it is slow or unavailable")
+	flag.DurationVar(&cfg.ProxyWait, "proxy-wait", 2*time.Minute, "time to hold a request while no cache source is reachable")
 	flag.DurationVar(&cfg.DiscoveryInterval, "discovery-interval", time.Minute, "time between discovery scans")
 	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 500*time.Millisecond, "timeout for each peer probe")
 	flag.IntVar(&cfg.DiscoveryWorkers, "discovery-workers", 256, "concurrent discovery probes")
@@ -166,7 +169,8 @@ func run() error {
 	monitor := trust.New(cfg.TrustedNetworks, cfg.PublicIPURL, 5*time.Second, logger)
 	prober := discovery.New(cfg.DiscoveryRanges, cfg.Port, cfg.DiscoveryTimeout, cfg.DiscoveryWorkers, scheme, cfg.InstanceID, peers, logger)
 	prober.Gate = monitor.Trusted
-	proxier := proxy.New(peers, storeDir, cfg.SecretKey, cfg.InstanceID, cfg.Fallbacks, cfg.TrustedKeys, cfg.VerifyFallbackSignatures, 10*time.Second, scheme, logger)
+	proxier := proxy.New(peers, storeDir, cfg.SecretKey, cfg.InstanceID, cfg.Fallbacks, cfg.TrustedKeys, cfg.VerifyFallbackSignatures, cfg.ProxyTimeout, cfg.ProxyRetries, scheme, logger)
+	proxier.WaitTimeout = cfg.ProxyWait
 
 	handler := server.New(server.Options{
 		StoreDir:   storeDir,
@@ -199,6 +203,8 @@ func run() error {
 			ticker := time.NewTicker(autoPrefixInterval)
 			defer ticker.Stop()
 
+			connected := true
+
 			for {
 				select {
 				case <-ctx.Done():
@@ -206,16 +212,25 @@ func run() error {
 				case <-ticker.C:
 				}
 
-				if len(discovery.PrimaryPrefixes()) > 0 {
+				prefixes := discovery.PrimaryPrefixes()
+
+				if len(prefixes) == 0 {
+					if connected {
+						logger.Warn("lost the local network prefix, holding requests until it returns")
+						peers.Clear()
+						prober.SetRanges(nil)
+						connected = false
+					}
+
 					continue
 				}
 
-				logger.Warn(
-					"lost the local network prefix, exiting so the service restarts and waits for a network connection",
-				)
-				stop()
+				prober.SetRanges(prefixes)
 
-				return
+				if !connected {
+					logger.Info("local network prefix is back", "prefixes", fmt.Sprint(prefixes))
+					connected = true
+				}
 			}
 		}()
 	}
