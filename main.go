@@ -59,7 +59,7 @@ func run() error {
 	flag.IntVar(&cfg.ProxyRetries, "proxy-retries", 3, "retries per upstream source when it is slow or unavailable")
 	flag.DurationVar(&cfg.ProxyWait, "proxy-wait", 2*time.Minute, "time to hold a request while no cache source is reachable")
 	flag.DurationVar(&cfg.DiscoveryInterval, "discovery-interval", time.Minute, "time between discovery scans")
-	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 500*time.Millisecond, "timeout for each peer probe")
+	flag.DurationVar(&cfg.DiscoveryTimeout, "discovery-timeout", 1500*time.Millisecond, "timeout for each peer probe")
 	flag.IntVar(&cfg.DiscoveryWorkers, "discovery-workers", 256, "concurrent discovery probes")
 	flag.BoolVar(&cfg.DiscoveryAuto, "discovery-auto", false, "use the connected network's subnets for discovery and serving")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file")

@@ -255,8 +255,12 @@ in
 
       timeout = mkOption {
         type = types.ints.positive;
-        default = 500;
-        description = "Milliseconds allowed for each probe.";
+        default = 1500;
+        description = ''
+          Milliseconds allowed for each probe. Wi-Fi round trips of several
+          hundred milliseconds are normal, and a probe timeout below that
+          makes a healthy peer look gone and evicts it.
+        '';
       };
 
       workers = mkOption {
